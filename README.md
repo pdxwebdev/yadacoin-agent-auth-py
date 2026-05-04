@@ -65,7 +65,7 @@ for full semantics.
 
 - [JS SDK](https://github.com/pdxwebdev/yadacoin-agent-auth-js) — `@yadacoin/agent-auth`
 - [Protocol specification](https://pdxwebdev.github.io/yadacoin-agent-auth-spec)
-- [did:yadacoin method spec](https://pdxwebdev.github.io/yadacoin/did-yadacoin-method-spec.html)
+- [did:yadacoin method spec](https://pdxwebdev.github.io/yadacoin-agent-auth-spec/did-yadacoin-method-spec.html)
 - [YadaCoin node](https://github.com/pdxwebdev/yadacoin)
 
 ## License
