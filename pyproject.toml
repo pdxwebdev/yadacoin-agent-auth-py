@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "yadacoin-agent-auth"
-version = "1.3.0"
+version = "1.3.1"
 description = "Server-side SDK for the YadaCoin KEL Agent Auth Protocol"
 readme = "README.md"
 license = { text = "YadaCoin Open Source License (YOSL) v1.1" }
@@ -26,7 +26,7 @@ requires-python = ">=3.9"
 # Core dependencies — no local yadacoin node required
 dependencies = [
     "coincurve>=13.0",
-    "bitcoin>=1.1.42",
+    "python-bitcoinlib>=0.12.0",
 ]
 
 [project.optional-dependencies]
