@@ -1,4 +1,5 @@
 """Smoke tests — verify public API is importable and basic types are correct."""
+
 import pytest
 from yadacoin_agent_auth import (
     AuthError,
@@ -66,7 +67,10 @@ def test_make_challenge_differs_across_keys():
     )
     pub_a = "02" + "a1" * 32
     pub_b = "02" + "b2" * 32
-    assert validator.make_challenge(pub_a)["challenge"] != validator.make_challenge(pub_b)["challenge"]
+    assert (
+        validator.make_challenge(pub_a)["challenge"]
+        != validator.make_challenge(pub_b)["challenge"]
+    )
 
 
 def test_rest_provider_base_url_stored():
@@ -78,3 +82,62 @@ def test_kel_provider_protocol_satisfied():
     """YadaCoinRestKelProvider must satisfy the KelProvider Protocol."""
     provider = YadaCoinRestKelProvider("https://yadacoin.io")
     assert hasattr(provider, "build_from_public_key")
+
+
+def test_validate_vp_method_exists():
+    """AgentAuthValidator must expose validate_vp()."""
+    validator = AgentAuthValidator(
+        challenge_secret=b"test-secret",
+        kel_provider=YadaCoinRestKelProvider("https://yadacoin.io"),
+    )
+    assert callable(getattr(validator, "validate_vp", None))
+
+
+def test_validate_vp_rejects_missing_fields():
+    """validate_vp raises AuthError(400) when required args are empty."""
+    import asyncio
+
+    validator = AgentAuthValidator(
+        challenge_secret=b"test-secret",
+        kel_provider=YadaCoinRestKelProvider("https://yadacoin.io"),
+    )
+    with pytest.raises(AuthError) as exc_info:
+        asyncio.get_event_loop().run_until_complete(
+            validator.validate_vp("", "challenge", {"type": ["VerifiablePresentation"]})
+        )
+    assert exc_info.value.http_status == 400
+
+
+def test_validate_vp_rejects_bad_challenge():
+    """validate_vp raises AuthError(401) when challenge is wrong."""
+    import asyncio
+
+    validator = AgentAuthValidator(
+        challenge_secret=b"test-secret",
+        kel_provider=YadaCoinRestKelProvider("https://yadacoin.io"),
+    )
+    pub = "02" + "a1" * 32
+    with pytest.raises(AuthError) as exc_info:
+        asyncio.get_event_loop().run_until_complete(
+            validator.validate_vp(
+                pub, "badhex000", {"type": ["VerifiablePresentation"]}
+            )
+        )
+    assert exc_info.value.http_status == 401
+
+
+def test_validate_vp_rejects_bad_vp_type():
+    """validate_vp raises AuthError(400) when VP type is wrong."""
+    import asyncio
+
+    validator = AgentAuthValidator(
+        challenge_secret=b"test-secret",
+        kel_provider=YadaCoinRestKelProvider("https://yadacoin.io"),
+    )
+    pub = "02" + "a1" * 32
+    challenge = validator.make_challenge(pub)["challenge"]
+    with pytest.raises(AuthError) as exc_info:
+        asyncio.get_event_loop().run_until_complete(
+            validator.validate_vp(pub, challenge, {"type": ["SomethingElse"]})
+        )
+    assert exc_info.value.http_status == 400

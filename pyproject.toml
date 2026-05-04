@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "yadacoin-agent-auth"
-version = "1.2.0"
+version = "1.3.0"
 description = "Server-side SDK for the YadaCoin KEL Agent Auth Protocol"
 readme = "README.md"
 license = { text = "YadaCoin Open Source License (YOSL) v1.1" }

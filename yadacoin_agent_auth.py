@@ -430,6 +430,222 @@ class AgentAuthValidator:
             kel_txid=kel_txid,
         )
 
+    async def validate_vp(
+        self,
+        public_key: str,
+        challenge: str,
+        vp: Dict[str, Any],
+    ) -> AuthResult:
+        """Authenticate a VP-based agent request and return an AuthResult on success.
+
+        Used by vendor endpoints that require a Verifiable Presentation so that
+        the agent can present scoped credentials to independent third-party services
+        without those services needing to understand the full KEL protocol.
+
+        Performs all required validation steps from the spec (v1.2) for the VP flow:
+          1. Challenge validity (HMAC-SHA256, 30-second windows)
+          2. Public key parse and address derivation
+          3. VP structure check (type, holder == did:yadacoin:<public_key>)
+          4. VP proof verification — SHA256(challenge_bytes + canonical_vp_sans_proof_bytes)
+          5. VC + presented scope extraction from VP
+          6. KEL existence
+          7. On-chain scope + credentialStatus.mode read
+          8. Revocation check (skipped for mode="temporal")
+          9. Pre-commitment check (both modes)
+         10. VP scope ceiling check — VP cannot exceed on-chain scope
+
+        Returns an AuthResult whose ``scope`` is the *presented* VP scope
+        (already checked against the on-chain ceiling).
+
+        Raises AuthError on any failure with an appropriate http_status.
+        """
+        public_key = (public_key or "").strip()
+        challenge = (challenge or "").strip()
+
+        if not public_key or not challenge or not vp:
+            raise AuthError("public_key, challenge, and vp are required", 400)
+
+        # Step 1 — challenge validity
+        if not self.validate_challenge(public_key, challenge):
+            raise AuthError("challenge expired or invalid — request a fresh one", 401)
+
+        # Step 2 — parse public key + derive address
+        try:
+            pub_key_bytes = bytes.fromhex(public_key)
+            if len(pub_key_bytes) not in (33, 65):
+                raise ValueError("unexpected length")
+        except Exception as exc:
+            raise AuthError(f"invalid public_key: {exc}", 400) from exc
+
+        try:
+            from bitcoin.wallet import P2PKHBitcoinAddress  # type: ignore
+
+            address = str(P2PKHBitcoinAddress.from_pubkey(pub_key_bytes))
+        except Exception as exc:
+            raise AuthError(
+                f"could not derive address from public_key: {exc}", 400
+            ) from exc
+
+        # Step 3 — VP structure
+        if "VerifiablePresentation" not in vp.get("type", []):
+            raise AuthError("vp.type must include 'VerifiablePresentation'", 400)
+
+        expected_holder = f"did:yadacoin:{public_key}"
+        if vp.get("holder") != expected_holder:
+            raise AuthError(
+                f"VP holder '{vp.get('holder')}' does not match supplied public_key",
+                403,
+            )
+
+        # Step 4 — VP proof verification
+        # The proof message is SHA256(challenge_bytes + canonical_vp_sans_proof_bytes)
+        # where canonical = JSON with sorted top-level keys, no whitespace.
+        proof = vp.get("proof")
+        if not proof:
+            raise AuthError("VP missing proof", 400)
+        if proof.get("challenge") != challenge:
+            raise AuthError(
+                f"VP proof.challenge '{proof.get('challenge')}' does not match supplied challenge",
+                401,
+            )
+        proof_value = proof.get("proofValue", "")
+        if not proof_value:
+            raise AuthError("VP missing proof.proofValue", 400)
+
+        vp_sans_proof = {k: v for k, v in vp.items() if k != "proof"}
+        vp_bytes = json.dumps(
+            vp_sans_proof, separators=(",", ":"), sort_keys=True
+        ).encode("utf-8")
+        msg_hash = hashlib.sha256(challenge.encode("utf-8") + vp_bytes).digest()
+
+        try:
+            sig_bytes = base64.b64decode(proof_value)
+        except Exception as exc:
+            raise AuthError(
+                f"VP proof.proofValue is not valid base64: {exc}", 401
+            ) from exc
+
+        try:
+            from coincurve import verify_signature as _verify  # type: ignore
+
+            ok = _verify(sig_bytes, msg_hash, pub_key_bytes, hasher=None)
+            if not ok:
+                raise ValueError("verify_signature returned False")
+        except AuthError:
+            raise
+        except Exception as exc:
+            raise AuthError(
+                f"VP proof signature verification failed: {exc}", 401
+            ) from exc
+
+        # Step 5 — extract presented scope from VC inside VP
+        vc_list = vp.get("verifiableCredential", [])
+        if not vc_list:
+            raise AuthError("VP contains no verifiableCredential", 400)
+        vc = vc_list[0] if isinstance(vc_list, list) else vc_list
+        vp_scope = _extract_scope(vc)
+
+        # Step 6 — KEL existence
+        try:
+            kel = await self._kel.build_from_public_key(public_key)
+        except Exception as exc:
+            raise AuthError(f"KEL lookup error: {exc}", 403) from exc
+
+        if not kel:
+            raise AuthError(
+                "no KEL found for this public key — key has not been provisioned on-chain",
+                403,
+            )
+
+        # Step 7 — read on-chain scope + credentialStatus.mode
+        on_chain_scope: Dict[str, Any] = {}
+        kel_status_mode = "rotation"
+        for entry in kel:
+            tpkh = (
+                getattr(entry, "twice_prerotated_key_hash", None)
+                if not isinstance(entry, dict)
+                else entry.get("twice_prerotated_key_hash")
+            )
+            if tpkh == address:
+                raw_rel = (
+                    getattr(entry, "relationship", None)
+                    if not isinstance(entry, dict)
+                    else entry.get("relationship")
+                )
+                if raw_rel:
+                    try:
+                        parsed = json.loads(
+                            base64.b64decode(raw_rel).decode("utf-8", errors="replace")
+                        )
+                        on_chain_scope = _extract_scope(parsed)
+                        cred_status = parsed.get("credentialStatus", {})
+                        if isinstance(cred_status, dict):
+                            kel_status_mode = cred_status.get(
+                                "mode", "rotation"
+                            ).lower()
+                    except Exception:
+                        pass
+                break
+
+        # Step 8 — revocation check (mode-aware)
+        if kel_status_mode == "rotation":
+            for entry in kel:
+                pkh = (
+                    getattr(entry, "public_key_hash", None)
+                    if not isinstance(entry, dict)
+                    else entry.get("public_key_hash")
+                )
+                if pkh == address:
+                    raise AuthError(
+                        "this key has already been spent and is revoked",
+                        403,
+                    )
+
+        # Step 9 — pre-commitment check (both modes)
+        latest = kel[-1]
+        prerotated = (
+            getattr(latest, "prerotated_key_hash", None)
+            if not isinstance(latest, dict)
+            else latest.get("prerotated_key_hash")
+        )
+        if prerotated != address:
+            raise AuthError(
+                "public key is not the pre-committed next signer in the KEL",
+                403,
+            )
+
+        # Step 10 — VP scope ceiling check
+        # The VP cannot claim services/dest that were not granted on-chain.
+        on_chain_services = [s.lower() for s in on_chain_scope.get("services", [])]
+        if on_chain_services:
+            for svc in vp_scope.get("services", []):
+                if svc.lower() not in on_chain_services:
+                    raise AuthError(
+                        f"VP claims service '{svc}' which is not in the on-chain authorised scope",
+                        403,
+                    )
+        on_chain_dest = (on_chain_scope.get("dest") or "").strip().lower()
+        vp_dest = (vp_scope.get("dest") or "").strip().lower()
+        if on_chain_dest and vp_dest and vp_dest != on_chain_dest:
+            raise AuthError(
+                f"VP claims destination '{vp_scope.get('dest')}' which is not in the on-chain authorised scope",
+                403,
+            )
+
+        kel_txid = (
+            getattr(latest, "transaction_signature", None)
+            if not isinstance(latest, dict)
+            else latest.get("transaction_signature") or latest.get("id")
+        )
+
+        return AuthResult(
+            address=address,
+            pub_key_bytes=pub_key_bytes,
+            kel=kel,
+            scope=vp_scope,  # presented scope (already validated against on-chain ceiling)
+            kel_txid=kel_txid,
+        )
+
     # ------------------------------------------------------------------
     # Scope enforcement helpers
     # ------------------------------------------------------------------
