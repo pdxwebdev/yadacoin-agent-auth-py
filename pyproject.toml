@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "yadacoin-agent-auth"
+version = "1.2.0"
+description = "Server-side SDK for the YadaCoin KEL Agent Auth Protocol"
+readme = "README.md"
+license = { text = "YadaCoin Open Source License (YOSL) v1.1" }
+authors = [{ name = "Matthew Vogel", email = "matt@yadacoin.io" }]
+keywords = ["yadacoin", "did", "verifiable-credentials", "agent-auth", "blockchain", "w3c-vc"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security :: Cryptography",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+requires-python = ">=3.9"
+
+# Core dependencies — no local yadacoin node required
+dependencies = [
+    "coincurve>=13.0",
+    "bitcoin>=1.1.42",
+]
+
+[project.optional-dependencies]
+# Use a locally running YadaCoin node as the KEL provider
+node = ["yadacoin"]
+
+# Use the public REST API as the KEL provider (no local node required)
+rest = ["aiohttp>=3.8"]
+
+# Both providers
+all = ["yadacoin", "aiohttp>=3.8"]
+
+dev = [
+    "pytest>=7",
+    "pytest-asyncio>=0.23",
+    "hatch",
+]
+
+[project.urls]
+Homepage = "https://yadacoin.io"
+Repository = "https://github.com/pdxwebdev/yadacoin-agent-auth-py"
+Documentation = "https://pdxwebdev.github.io/yadacoin-agent-auth-spec"
+"Bug Tracker" = "https://github.com/pdxwebdev/yadacoin-agent-auth-py/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["yadacoin_agent_auth.py"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
